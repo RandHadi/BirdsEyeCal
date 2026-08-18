@@ -1,10 +1,14 @@
-export type CalendarId = "work" | "personal" | "focus" | "travel";
+export type CalendarId = string;
 
 export interface CalendarSource {
   id: CalendarId;
   name: string;
   color: string;
   softColor: string;
+  primary?: boolean;
+  selected?: boolean;
+  accessRole?: string;
+  timeZone?: string;
 }
 
 export interface CalendarEvent {
@@ -16,6 +20,8 @@ export interface CalendarEvent {
   calendarId: CalendarId;
   location?: string;
   notes?: string;
+  eventType?: string;
+  htmlLink?: string;
 }
 
 export const calendars: CalendarSource[] = [
