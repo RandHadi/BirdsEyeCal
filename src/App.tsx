@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   calendars as demoCalendars,
   dateKey,
@@ -58,6 +58,8 @@ const formatTime = (date: Date) =>
   }).format(date);
 
 const isSameLocalDate = (a: Date, b: Date) => dateKey(a) === dateKey(b);
+const clampMonthWidth = (width: number) => Math.min(360, Math.max(72, width));
+const hiddenCalendarsStorageKey = "birdseye:hidden-calendar-filters";
 
 const parseDateInput = (value: string) => {
   const [year, month, day] = value.split("-").map(Number);
@@ -350,6 +352,21 @@ function App() {
   const [enabledCalendars, setEnabledCalendars] = useState<Set<CalendarId>>(
     new Set(demoCalendars.map((calendar) => calendar.id)),
   );
+  const [hiddenCalendars, setHiddenCalendars] = useState<Set<CalendarId>>(() => {
+    try {
+      const saved = JSON.parse(
+        window.localStorage.getItem(hiddenCalendarsStorageKey) ?? "[]",
+      );
+      return new Set<CalendarId>(
+        Array.isArray(saved)
+          ? saved.filter((value): value is CalendarId => typeof value === "string")
+          : [],
+      );
+    } catch {
+      return new Set<CalendarId>();
+    }
+  });
+  const [showHiddenCalendars, setShowHiddenCalendars] = useState(false);
   const [query, setQuery] = useState("");
   const [density, setDensity] = useState<"fit" | "roomy">("fit");
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
@@ -367,10 +384,20 @@ function App() {
   const [syncing, setSyncing] = useState(false);
   const [calendarError, setCalendarError] = useState("");
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
+  const [monthWidths, setMonthWidths] = useState<number[] | null>(null);
+  const [resizingMonth, setResizingMonth] = useState<number | null>(null);
+  const yearGridRef = useRef<HTMLDivElement>(null);
+  const monthResizeCleanupRef = useRef<(() => void) | null>(null);
 
   const demoEvents = useMemo(() => generateEvents(year), [year]);
   const activeCalendars = authStatus.connected ? googleCalendars : demoCalendars;
   const allEvents = authStatus.connected ? googleEvents : demoEvents;
+  const shownCalendars = activeCalendars.filter(
+    (calendar) => !hiddenCalendars.has(calendar.id),
+  );
+  const availableHiddenCalendars = activeCalendars.filter((calendar) =>
+    hiddenCalendars.has(calendar.id),
+  );
   const calendarById = useMemo(
     () => new Map(activeCalendars.map((calendar) => [calendar.id, calendar])),
     [activeCalendars],
@@ -380,6 +407,86 @@ function App() {
     name: "Calendar",
     color: "#68758b",
     softColor: "#e9edf2",
+  };
+
+  const currentMonthWidths = () =>
+    Array.from(yearGridRef.current?.querySelectorAll<HTMLElement>(".month") ?? []).map(
+      (month) => month.getBoundingClientRect().width,
+    );
+
+  const startMonthResize = (
+    event: React.PointerEvent<HTMLButtonElement>,
+    monthIndex: number,
+  ) => {
+    const widths = currentMonthWidths();
+    if (widths.length !== monthNames.length) return;
+    event.preventDefault();
+    monthResizeCleanupRef.current?.();
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startWidth = widths[monthIndex];
+
+    const moveResize = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      moveEvent.preventDefault();
+      const nextWidths = [...widths];
+      nextWidths[monthIndex] = clampMonthWidth(
+        startWidth + moveEvent.clientX - startX,
+      );
+      setMonthWidths(nextWidths);
+    };
+
+    const finishResize = (finishEvent: PointerEvent) => {
+      if (finishEvent.pointerId !== pointerId) return;
+      cleanupResize();
+      setResizingMonth(null);
+    };
+
+    const cleanupResize = () => {
+      window.removeEventListener("pointermove", moveResize);
+      window.removeEventListener("pointerup", finishResize);
+      window.removeEventListener("pointercancel", finishResize);
+      document.body.classList.remove("is-resizing-month");
+      monthResizeCleanupRef.current = null;
+    };
+
+    window.addEventListener("pointermove", moveResize, { passive: false });
+    window.addEventListener("pointerup", finishResize);
+    window.addEventListener("pointercancel", finishResize);
+    document.body.classList.add("is-resizing-month");
+    monthResizeCleanupRef.current = cleanupResize;
+    setMonthWidths(widths);
+    setResizingMonth(monthIndex);
+  };
+
+  useEffect(() => () => monthResizeCleanupRef.current?.(), []);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      hiddenCalendarsStorageKey,
+      JSON.stringify([...hiddenCalendars]),
+    );
+  }, [hiddenCalendars]);
+
+  const resizeMonthWithKeyboard = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    monthIndex: number,
+  ) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const widths = monthWidths ?? currentMonthWidths();
+    if (widths.length !== monthNames.length) return;
+    const nextWidths = [...widths];
+    const step = event.shiftKey ? 24 : 8;
+    nextWidths[monthIndex] = clampMonthWidth(
+      widths[monthIndex] + (event.key === "ArrowRight" ? step : -step),
+    );
+    setMonthWidths(nextWidths);
+  };
+
+  const changeDensity = (nextDensity: "fit" | "roomy") => {
+    setDensity(nextDensity);
+    setMonthWidths(null);
   };
 
   useEffect(() => {
@@ -424,7 +531,13 @@ function App() {
           (calendar) => calendar.selected || calendar.primary,
         );
         const initial = preferred.length ? preferred : calendarList.slice(0, 1);
-        setEnabledCalendars(new Set(initial.map((calendar) => calendar.id)));
+        setEnabledCalendars(
+          new Set(
+            initial
+              .filter((calendar) => !hiddenCalendars.has(calendar.id))
+              .map((calendar) => calendar.id),
+          ),
+        );
       })
       .catch((error: unknown) => {
         if (!cancelled) {
@@ -543,6 +656,7 @@ function App() {
         setSelectedDate(null);
         setCreateDate(null);
         setShowConnect(false);
+        setShowHiddenCalendars(false);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -565,6 +679,27 @@ function App() {
       }
       return next;
     });
+  };
+
+  const hideCalendar = (calendarId: CalendarId) => {
+    setHiddenCalendars((current) => new Set(current).add(calendarId));
+    setEnabledCalendars((current) => {
+      const next = new Set(current);
+      next.delete(calendarId);
+      return next;
+    });
+  };
+
+  const restoreCalendar = (calendarId: CalendarId) => {
+    setHiddenCalendars((current) => {
+      const next = new Set(current);
+      next.delete(calendarId);
+      return next;
+    });
+    setEnabledCalendars((current) => new Set(current).add(calendarId));
+    if (availableHiddenCalendars.length === 1) {
+      setShowHiddenCalendars(false);
+    }
   };
 
   const jumpToToday = () => {
@@ -593,6 +728,11 @@ function App() {
       ),
     );
     setEnabledCalendars((current) => new Set(current).add(created.calendarId));
+    setHiddenCalendars((current) => {
+      const next = new Set(current);
+      next.delete(created.calendarId);
+      return next;
+    });
     setCreateDate(null);
     setToast(`Added “${created.title}” to Google Calendar.`);
     void loadLiveEvents();
@@ -668,13 +808,7 @@ function App() {
       </header>
 
       <main>
-        <section className="hero" aria-labelledby="page-title">
-          <div className="hero-copy">
-            <p className="eyebrow"><Icon name="sparkle" size={15} /> Your year, without the scroll</p>
-            <h1 id="page-title">See the shape of your year.</h1>
-            <p>Plans, patterns, and breathing room—twelve months in one calm view.</p>
-          </div>
-
+        <section className="hero" aria-label="Year overview">
           <div className="stats" aria-label={`${year} summary`}>
             <div className="stat">
               <span>Event days</span>
@@ -734,41 +868,103 @@ function App() {
             </label>
 
             <div className="density-control" aria-label="Calendar density">
-              <button className={density === "fit" ? "active" : ""} onClick={() => setDensity("fit")}>Fit year</button>
-              <button className={density === "roomy" ? "active" : ""} onClick={() => setDensity("roomy")}>Roomy</button>
+              <button className={density === "fit" ? "active" : ""} onClick={() => changeDensity("fit")}>Fit year</button>
+              <button className={density === "roomy" ? "active" : ""} onClick={() => changeDensity("roomy")}>Roomy</button>
             </div>
           </div>
 
           <div className="filter-row" aria-label="Visible calendars">
             <span className="filter-label">Calendars</span>
-            {activeCalendars.map((calendar) => {
+            {shownCalendars.map((calendar) => {
               const enabled = enabledCalendars.has(calendar.id);
               return (
-                <button
+                <div
                   className={`calendar-filter ${enabled ? "enabled" : ""}`}
                   key={calendar.id}
-                  onClick={() => toggleCalendar(calendar.id)}
                   style={{ "--calendar-color": calendar.color, "--calendar-soft": calendar.softColor } as React.CSSProperties}
-                  aria-pressed={enabled}
                 >
-                  <span className="filter-dot">{enabled && <Icon name="check" size={11} />}</span>
-                  {calendar.name}
-                </button>
+                  <button
+                    className="calendar-filter-toggle"
+                    onClick={() => toggleCalendar(calendar.id)}
+                    aria-pressed={enabled}
+                  >
+                    <span className="filter-dot">{enabled && <Icon name="check" size={11} />}</span>
+                    <span>{calendar.name}</span>
+                  </button>
+                  <button
+                    className="calendar-filter-hide"
+                    onClick={() => hideCalendar(calendar.id)}
+                    aria-label={`Hide ${calendar.name} from this row`}
+                    title={`Hide ${calendar.name}`}
+                  >
+                    <Icon name="close" size={11} />
+                  </button>
+                </div>
               );
             })}
+            {availableHiddenCalendars.length > 0 && (
+              <>
+                <button
+                  className="hidden-calendar-toggle"
+                  onClick={() => setShowHiddenCalendars((current) => !current)}
+                  aria-expanded={showHiddenCalendars}
+                  aria-controls="hidden-calendar-list"
+                >
+                  <Icon name="plus" size={12} />
+                  {availableHiddenCalendars.length} hidden
+                </button>
+                {showHiddenCalendars && (
+                  <div className="hidden-calendar-list" id="hidden-calendar-list" aria-label="Hidden calendars">
+                    {availableHiddenCalendars.map((calendar) => (
+                      <button
+                        key={calendar.id}
+                        onClick={() => restoreCalendar(calendar.id)}
+                        style={{ "--calendar-color": calendar.color } as React.CSSProperties}
+                      >
+                        <span className="hidden-calendar-dot" />
+                        {calendar.name}
+                        <strong>Show</strong>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
             {query && <span className="result-count">{filteredEvents.length} matching events</span>}
           </div>
 
           <div className="year-scroll">
-            <div className="year-grid" role="grid" aria-label={`${year} calendar`}>
+            <div
+              className="year-grid"
+              role="grid"
+              aria-label={`${year} calendar`}
+              ref={yearGridRef}
+              style={monthWidths ? {
+                gridTemplateColumns: monthWidths.map((width) => `${width}px`).join(" "),
+                minWidth: `${monthWidths.reduce((total, width) => total + width, 0)}px`,
+                width: `${monthWidths.reduce((total, width) => total + width, 0)}px`,
+              } : undefined}
+            >
               {monthNames.map((month, monthIndex) => {
                 const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
                 return (
-                  <section className={`month tone-${monthTones[monthIndex]}`} key={month} aria-label={`${month} ${year}`}>
+                  <section
+                    className={`month tone-${monthTones[monthIndex]} ${resizingMonth === monthIndex ? "is-resizing" : ""}`}
+                    key={month}
+                    aria-label={`${month} ${year}`}
+                  >
                     <header className="month-header">
                       <span className="month-full">{month}</span>
                       <span className="month-short">{monthShortNames[monthIndex]}</span>
                       <small>{daysInMonth} days</small>
+                      <button
+                        className="month-resizer"
+                        type="button"
+                        aria-label={`Resize ${month} column. Use left and right arrow keys for precise control.`}
+                        title={`Drag to resize ${month}`}
+                        onPointerDown={(event) => startMonthResize(event, monthIndex)}
+                        onKeyDown={(event) => resizeMonthWithKeyboard(event, monthIndex)}
+                      />
                     </header>
                     <div className="month-days">
                       {Array.from({ length: 31 }, (_, dayIndex) => {
